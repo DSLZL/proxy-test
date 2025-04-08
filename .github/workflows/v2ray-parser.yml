@@ -18,7 +18,7 @@ jobs:
 
     - name: 获取订阅内容
       env:
-        SUB_URL: https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2
+        SUB_URL: ${{ github.event.inputs.subscribe_url }}
       run: |
         curl -sL "$SUB_URL" | base64 -d > nodes.txt
 
