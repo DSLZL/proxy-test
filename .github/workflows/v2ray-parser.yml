@@ -25,51 +25,69 @@ jobs:
     - name: 解析并测试节点
       run: |
         function measure_latency() {
-          local host=$1
-          local port=$2
-          local start end
-          
-          start=$(date +%s%3N)
-          timeout 5 bash -c ">/dev/tcp/$host/$port" 2>/dev/null
-          if [ $? -eq 0 ]; then
-            end=$(date +%s%3N)
-            echo "scale=2; ($end - $start)/1000" | bc
-          else
-            echo "超时"
-          fi
+            local host=$1
+            local port=$2
+            local start end
+    
+            # 使用更可靠的 nc 命令替代 /dev/tcp
+            start=$(date +%s%3N)
+            if timeout 5 nc -zv $host $port >/dev/null 2>&1; then
+                end=$(date +%s%3N)
+                echo "scale=2; ($end - $start)/1000" | bc
+            else
+                echo "超时"
+            fi
         }
 
         while read -r line; do
-          case $line in
-            vmess://*)
-              payload=$(echo "$line" | awk -F'vmess://' '{print $2}' | cut -d'#' -f1 | sed 's/\=*$//')
-              json=$(echo "$payload" | base64 -d 2>/dev/null)
-              name=$(echo "$json" | jq -r '.ps // empty')
-              server=$(echo "$json" | jq -r '.add')
-              port=$(echo "$json" | jq -r '.port')
-              ;;
+            case $line in
+                vmess://*)
+                    payload=$(echo "$line" | awk -F'vmess://' '{print $2}' | cut -d'#' -f1 | sed 's/\=*$//')
+                    # 处理 base64 填充问题
+                    json=$(echo "$payload" | awk '{print $1}' | base64 -d 2>/dev/null)
+                    name=$(echo "$json" | jq -r '.ps // empty' | sed 's/[^a-zA-Z0-9]/_/g')
+                    server=$(echo "$json" | jq -r '.add')
+                    port=$(echo "$json" | jq -r '.port')
+                    ;;
+        
+                vless://*|trojan://*)
+                    server_info=$(echo "$line" | awk -F'[@#]' '{print $2}')
+                    server=$(echo "$server_info" | cut -d':' -f1)
+                    port=$(echo "$server_info" | awk -F: '{print $2}' | cut -d'/' -f1)
+                    name=$(echo "$line" | awk -F'#' '{print $2}' | sed 's/[^a-zA-Z0-9]/_/g')
+                    ;;
+        
+                ss://*)
+                    # 修复密码解析错误
+                    decoded_part=$(echo "$line" | sed 's/ss:\/\///;s/#.*//')
+                    padding=$(( (4 - (${#decoded_part} % 4)) %4 ))
+                    decoded=$(echo "$decoded_part" | sed "s/$/$(printf '=%.0s' $(seq 1 $padding))/" | base64 -d 2>/dev/null)
             
-            vless://*|trojan://*)
-              server_info=$(echo "$line" | awk -F'[@#]' '{print $2}')
-              server=$(echo "$server_info" | cut -d':' -f1)
-              port=$(echo "$server_info" | cut -d':' -f2 | cut -d'/' -f1)
-              name=$(echo "$line" | awk -F'#' '{print $2}')
-              ;;
-            
-            ss://*)
-              decoded=$(echo "$line" | sed 's/ss:\/\///;s/#.*//' | base64 -d 2>/dev/null)
-              method=$(echo "$decoded" | cut -d':' -f1)
-              password=$(echo "$decoded" | cut -d':' -f2 | cut -d'@' -f1)
-              server=$(echo "$decoded" | cut -d'@' -f2 | cut -d':' -f1)
-              port=$(echo "$decoded" | cut -d'@' -f2 | cut -d':' -f2)
-              name=$(echo "$line" | awk -F'#' '{print $2}')
-              ;;
-          esac
+                    method=$(echo "$decoded" | cut -d':' -f1)
+                    password=$(echo "$decoded" | cut -d':' -f2 | cut -d'@' -f1)
+                    server_port=$(echo "$decoded" | cut -d'@' -f2)
+                    server=$(echo "$server_port" | cut -d':' -f1)
+                    port=$(echo "$server_port" | cut -d':' -f2)
+                    name=$(echo "$line" | awk -F'#' '{print $2}' | sed 's/[^a-zA-Z0-9]/_/g')
+                    ;;
+            esac
 
-          [[ -z "$name" ]] && name="未命名节点_$(echo "$line" | md5sum | cut -c1-6)"
-          [[ -z "$server" ]] && server="无效地址"
-          [[ -z "$port" ]] && port="0"
+            # 增加空值验证
+            [[ -z "$name" ]] && name="未命名节点_$(echo "$line" | md5sum | cut -c1-6)"
+            [[ "$server" == "null" ]] && server=""
+            [[ "$port" == "null" ]] && port=""
+    
+            # 跳过无效条目
+            if [[ -z "$server" || -z "$port" || "$port" -eq 0 ]]; then
+                echo "[错误] 无效节点: $name"
+                continue
+            fi
 
-          latency=$(measure_latency "$server" "$port")
-          echo "${name} | 延迟: ${latency}s"
+            # 增加超时重试机制
+            for i in {1..2}; do
+                latency=$(measure_latency "$server" "$port")
+                [[ "$latency" != "超时" ]] && break
+            done
+    
+            echo "${name} | 延迟: ${latency}s"
         done < <(grep -E 'vmess://|vless://|trojan://|ss://' nodes.txt)
